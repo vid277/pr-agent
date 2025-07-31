@@ -1,14 +1,13 @@
 from typing import Dict, Any
 from pr_agent.dicl.auto_learning import DualModelReviewer
 import asyncio
-from pr_agent.algo.rag_handler import HybridSearchRAG
+from pr_agent.algo.rag_handler import RAGHandler
 
 
 class DICL:
     @staticmethod
     async def evolve(pr_data: Dict[str, Any], base_prompt: str) -> str:
-        print("🔄 Starting continuous learning cycle...")
-        print("📖 Step 1: Retrieving insights from previous reviews...")
+        print("Retrieving insights from previous reviews...")
 
         dual_reviewer = DualModelReviewer()
         enhanced_review, insights_count = await dual_reviewer.dual_review_with_learning(
@@ -16,21 +15,17 @@ class DICL:
         )
 
         if insights_count > 0:
-            print(
-                f"🧠 Step 4: Generated {insights_count} new insights stored for future reviews"
-            )
-            print(
-                "♻️  Continuous feedback loop: New insights will enhance future reviews"
-            )
+            print(f"Generated {insights_count} new insights stored for future reviews")
+            print("New insights will enhance future reviews")
         else:
-            print("ℹ️  No new insights generated (high model agreement)")
+            print("No new insights generated (high model agreement)")
 
         return enhanced_review
 
     @staticmethod
     def regular(pr_data: Dict[str, Any], base_prompt: str) -> str:
         try:
-            rag = HybridSearchRAG("pinecone")
+            rag = RAGHandler()
             title = pr_data.get("title", "")
             description = pr_data.get("description", "")
             changed_files = pr_data.get("changed_files", [])
@@ -64,9 +59,15 @@ class DICL:
                     )
                 )
             except Exception:
+                search_query = f"{title} {description}"
+                if changed_files:
+                    search_query += f" {' '.join(changed_files[:3])}"
+                if language:
+                    search_query += f" {language}"
                 insights = rag.get_relevant_learning_insights(
-                    f"{title} {description}", max_insights=10
+                    search_query, max_insights=10
                 )
+
         except Exception:
             return base_prompt
 

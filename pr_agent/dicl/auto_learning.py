@@ -223,9 +223,9 @@ Create instructions that directly improve future review capabilities by teaching
         self, insights: List[str], pr_context: Dict[str, Any]
     ) -> bool:
         try:
-            from pr_agent.algo.rag_handler import HybridSearchRAG
+            from pr_agent.algo.rag_handler import RAGHandler
 
-            rag = HybridSearchRAG("pinecone")
+            rag = RAGHandler()
             stored_count = 0
 
             for insight in insights:
@@ -297,9 +297,9 @@ class DualModelReviewer:
     async def get_enhanced_prompts_with_insights(
         self, pr_data: Dict[str, Any], base_prompt: str
     ) -> Dict[str, str]:
-        from pr_agent.algo.rag_handler import HybridSearchRAG
+        from pr_agent.algo.rag_handler import RAGHandler
 
-        rag = HybridSearchRAG("pinecone")
+        rag = RAGHandler()
         insights = await rag.get_relevant_learning_insights_with_context(
             pr_title=pr_data.get("title", ""),
             pr_description=pr_data.get("description", ""),
