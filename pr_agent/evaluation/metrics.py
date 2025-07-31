@@ -1,9 +1,3 @@
-"""
-Evaluation Metrics System for PR Agent Performance
-
-This module provides comprehensive metrics calculation for evaluating
-how well different models detect known errors in Kubernetes code.
-"""
 
 import re
 from dataclasses import dataclass
@@ -15,7 +9,6 @@ from .test_cases import TestCase, KnownError, ErrorCategory, ErrorSeverity
 
 @dataclass
 class DetectedError:
-    """Represents an error detected by a model"""
     line_number: int
     error_description: str
     severity_mentioned: str = None
@@ -24,7 +17,6 @@ class DetectedError:
 
 @dataclass
 class EvaluationResult:
-    """Results of evaluating a model on a test case"""
     test_case_id: str
     model_name: str
     true_positives: List[Tuple[KnownError, DetectedError]]
@@ -39,7 +31,6 @@ class EvaluationResult:
 
 @dataclass
 class ModelPerformanceReport:
-    """Comprehensive performance report for a model"""
     model_name: str
     total_test_cases: int
     overall_precision: float
@@ -53,26 +44,16 @@ class ModelPerformanceReport:
     improvement_suggestions: List[str]
 
 class ErrorDetectionParser:
-    """Parses model output to extract detected errors"""
     
     @staticmethod
     def parse_review_output(review_text: str, model_name: str = "unknown") -> List[DetectedError]:
-        """
-        Parse model review output to extract detected errors with line numbers
-        """
         detected_errors = []
         
-        # Common patterns for error detection
         patterns = [
-            # Pattern: filename:line - description
             r'(\w+\.ya?ml):(\d+)\s*[-:]?\s*(.+?)(?:\n|$)',
-            # Pattern: Line 123: description
             r'[Ll]ine\s+(\d+):?\s*(.+?)(?:\n|$)',
-            # Pattern: at line 123, description
             r'at\s+line\s+(\d+)[,:]\s*(.+?)(?:\n|$)',
-            # Pattern: (line 123) description
             r'\(line\s+(\d+)\)\s*(.+?)(?:\n|$)',
-            # Generic issue detection
             r'(?:issue|problem|error|warning|concern|risk)[:\s]+(.+?)(?:\n|$)',
         ]
         
@@ -83,14 +64,13 @@ class ErrorDetectionParser:
             if not line_text or len(line_text) < 10:
                 continue
                 
-            # Try line-specific patterns first
             for pattern in patterns[:4]:
                 matches = re.finditer(pattern, line_text, re.IGNORECASE)
                 for match in matches:
-                    if len(match.groups()) == 3:  # filename:line pattern
+                    if len(match.groups()) == 3:
                         line_num = int(match.group(2))
                         description = match.group(3).strip()
-                    else:  # line number patterns
+                    else:
                         line_num = int(match.group(1))
                         description = match.group(2).strip()
                     
@@ -104,18 +84,16 @@ class ErrorDetectionParser:
                         ))
                         break
             
-            # Try generic issue detection if no line number found
             if not any(re.search(pattern, line_text, re.IGNORECASE) for pattern in patterns[:4]):
                 for pattern in patterns[4:]:
                     matches = re.finditer(pattern, line_text, re.IGNORECASE)
                     for match in matches:
                         description = match.group(1).strip()
                         if description and len(description) > 10:
-                            # Try to extract line number from context
                             line_num = ErrorDetectionParser._extract_line_number(description)
                             severity = ErrorDetectionParser._extract_severity(line_text)
                             detected_errors.append(DetectedError(
-                                line_number=line_num or 0,  # 0 indicates no specific line
+                                line_number=line_num or 0,
                                 error_description=description,
                                 severity_mentioned=severity,
                                 model_name=model_name
@@ -126,7 +104,6 @@ class ErrorDetectionParser:
     
     @staticmethod
     def _extract_severity(text: str) -> str:
-        """Extract severity level from text"""
         text = text.lower()
         if any(word in text for word in ['critical', 'severe', 'high']):
             return 'high'
@@ -138,7 +115,6 @@ class ErrorDetectionParser:
     
     @staticmethod
     def _extract_line_number(text: str) -> int:
-        """Try to extract line number from description text"""
         line_patterns = [
             r'line[:\s]+(\d+)',
             r':\s*(\d+)',
@@ -153,7 +129,6 @@ class ErrorDetectionParser:
     
     @staticmethod
     def _deduplicate_errors(errors: List[DetectedError]) -> List[DetectedError]:
-        """Remove duplicate errors based on line number and similar descriptions"""
         if not errors:
             return []
         
@@ -161,7 +136,6 @@ class ErrorDetectionParser:
         seen_combinations = set()
         
         for error in errors:
-            # Create a key based on line number and description similarity
             desc_key = ErrorDetectionParser._normalize_description(error.error_description)
             key = (error.line_number, desc_key)
             
@@ -173,30 +147,22 @@ class ErrorDetectionParser:
     
     @staticmethod
     def _normalize_description(description: str) -> str:
-        """Normalize error description for deduplication"""
-        # Remove common prefixes/suffixes and normalize whitespace
         normalized = re.sub(r'^(error|warning|issue|problem)[:\s]*', '', description.lower())
         normalized = re.sub(r'\s+', ' ', normalized.strip())
-        return normalized[:50]  # Use first 50 chars for comparison
+        return normalized[:50]
 
 class MetricsCalculator:
-    """Calculates performance metrics for model evaluation"""
     
     @staticmethod
     def evaluate_test_case(test_case: TestCase, detected_errors: List[DetectedError], 
                           model_name: str) -> EvaluationResult:
-        """
-        Evaluate detected errors against known errors for a single test case
-        """
         true_positives = []
         false_positives = []
         false_negatives = []
         
-        # Create sets for efficient matching
         known_errors_matched = set()
         detected_errors_matched = set()
         
-        # Find true positives by matching detected errors with known errors
         for i, detected in enumerate(detected_errors):
             best_match = None
             best_score = 0
@@ -206,7 +172,7 @@ class MetricsCalculator:
                     continue
                     
                 match_score = MetricsCalculator._calculate_match_score(detected, known)
-                if match_score > best_score and match_score >= 0.3:  # Threshold for matching
+                if match_score > best_score and match_score >= 0.3:
                     best_score = match_score
                     best_match = j
             
@@ -215,22 +181,18 @@ class MetricsCalculator:
                 known_errors_matched.add(best_match)
                 detected_errors_matched.add(i)
         
-        # Remaining detected errors are false positives
         for i, detected in enumerate(detected_errors):
             if i not in detected_errors_matched:
                 false_positives.append(detected)
         
-        # Unmatched known errors are false negatives
         for j, known in enumerate(test_case.known_errors):
             if j not in known_errors_matched:
                 false_negatives.append(known)
         
-        # Calculate metrics
         precision = len(true_positives) / len(detected_errors) if detected_errors else 0.0
         recall = len(true_positives) / len(test_case.known_errors) if test_case.known_errors else 1.0
         f1_score = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
         
-        # Calculate category and severity breakdowns
         category_scores = MetricsCalculator._calculate_category_scores(
             true_positives, false_positives, false_negatives
         )
@@ -253,11 +215,9 @@ class MetricsCalculator:
     
     @staticmethod
     def _calculate_match_score(detected: DetectedError, known: KnownError) -> float:
-        """Calculate similarity score between detected and known error"""
         score = 0.0
         
-        # Line number proximity (40% weight)
-        if detected.line_number > 0:  # Only if line number was detected
+        if detected.line_number > 0:
             line_diff = abs(detected.line_number - known.line_number)
             if line_diff == 0:
                 score += 0.4
@@ -266,14 +226,12 @@ class MetricsCalculator:
             elif line_diff <= 5:
                 score += 0.2
         
-        # Description similarity (50% weight)
         desc_similarity = MetricsCalculator._calculate_text_similarity(
             detected.error_description.lower(),
             known.description.lower()
         )
         score += 0.5 * desc_similarity
         
-        # Error type matching (10% weight)
         if known.error_type.lower() in detected.error_description.lower():
             score += 0.1
         
@@ -281,7 +239,6 @@ class MetricsCalculator:
     
     @staticmethod
     def _calculate_text_similarity(text1: str, text2: str) -> float:
-        """Calculate text similarity using word overlap"""
         words1 = set(re.findall(r'\w+', text1.lower()))
         words2 = set(re.findall(r'\w+', text2.lower()))
         
@@ -297,24 +254,20 @@ class MetricsCalculator:
     def _calculate_category_scores(true_positives: List[Tuple[KnownError, DetectedError]], 
                                  false_positives: List[DetectedError],
                                  false_negatives: List[KnownError]) -> Dict[str, Dict[str, float]]:
-        """Calculate precision, recall, F1 by error category"""
         category_stats = {}
         
-        # Count true positives by category
         for known_error, _ in true_positives:
             category = known_error.category.value
             if category not in category_stats:
                 category_stats[category] = {'tp': 0, 'fp': 0, 'fn': 0}
             category_stats[category]['tp'] += 1
         
-        # Count false negatives by category
         for known_error in false_negatives:
             category = known_error.category.value
             if category not in category_stats:
                 category_stats[category] = {'tp': 0, 'fp': 0, 'fn': 0}
             category_stats[category]['fn'] += 1
         
-        # Calculate metrics for each category
         category_scores = {}
         for category, stats in category_stats.items():
             tp, fp, fn = stats['tp'], stats['fp'], stats['fn']
@@ -334,24 +287,20 @@ class MetricsCalculator:
     def _calculate_severity_scores(true_positives: List[Tuple[KnownError, DetectedError]], 
                                  false_positives: List[DetectedError],
                                  false_negatives: List[KnownError]) -> Dict[str, Dict[str, float]]:
-        """Calculate precision, recall, F1 by error severity"""
         severity_stats = {}
         
-        # Count true positives by severity
         for known_error, _ in true_positives:
             severity = known_error.severity.value
             if severity not in severity_stats:
                 severity_stats[severity] = {'tp': 0, 'fp': 0, 'fn': 0}
             severity_stats[severity]['tp'] += 1
         
-        # Count false negatives by severity
         for known_error in false_negatives:
             severity = known_error.severity.value
             if severity not in severity_stats:
                 severity_stats[severity] = {'tp': 0, 'fp': 0, 'fn': 0}
             severity_stats[severity]['fn'] += 1
         
-        # Calculate metrics for each severity
         severity_scores = {}
         for severity, stats in severity_stats.items():
             tp, fp, fn = stats['tp'], stats['fp'], stats['fn']
@@ -369,7 +318,6 @@ class MetricsCalculator:
     
     @staticmethod
     def aggregate_results(results: List[EvaluationResult]) -> ModelPerformanceReport:
-        """Aggregate multiple evaluation results into overall performance report"""
         if not results:
             return ModelPerformanceReport(
                 model_name="unknown",
@@ -388,28 +336,24 @@ class MetricsCalculator:
         model_name = results[0].model_name
         total_cases = len(results)
         
-        # Calculate overall metrics (weighted by number of known errors per test case)
         total_weight = 0
         weighted_precision = 0
         weighted_recall = 0
         weighted_f1 = 0
         
-        # Aggregate category and severity performance
         category_aggregates = {}
         severity_aggregates = {}
         
         for result in results:
-            # Weight by number of true positives + false negatives (total known errors)
             weight = len(result.true_positives) + len(result.false_negatives)
             if weight == 0:
-                weight = 1  # Avoid division by zero
+                weight = 1
                 
             total_weight += weight
             weighted_precision += result.precision * weight
             weighted_recall += result.recall * weight
             weighted_f1 += result.f1_score * weight
             
-            # Aggregate category scores
             for category, scores in result.category_scores.items():
                 if category not in category_aggregates:
                     category_aggregates[category] = {'total_weight': 0, 'weighted_precision': 0, 
@@ -419,7 +363,6 @@ class MetricsCalculator:
                 category_aggregates[category]['weighted_recall'] += scores['recall'] * weight
                 category_aggregates[category]['weighted_f1'] += scores['f1_score'] * weight
             
-            # Aggregate severity scores
             for severity, scores in result.severity_scores.items():
                 if severity not in severity_aggregates:
                     severity_aggregates[severity] = {'total_weight': 0, 'weighted_precision': 0, 
@@ -429,12 +372,10 @@ class MetricsCalculator:
                 severity_aggregates[severity]['weighted_recall'] += scores['recall'] * weight
                 severity_aggregates[severity]['weighted_f1'] += scores['f1_score'] * weight
         
-        # Calculate final averages
         overall_precision = weighted_precision / total_weight if total_weight > 0 else 0.0
         overall_recall = weighted_recall / total_weight if total_weight > 0 else 0.0
         overall_f1 = weighted_f1 / total_weight if total_weight > 0 else 0.0
         
-        # Finalize category performance
         category_performance = {}
         for category, agg in category_aggregates.items():
             w = agg['total_weight']
@@ -444,7 +385,6 @@ class MetricsCalculator:
                 'f1_score': agg['weighted_f1'] / w if w > 0 else 0.0
             }
         
-        # Finalize severity performance
         severity_performance = {}
         for severity, agg in severity_aggregates.items():
             w = agg['total_weight']
@@ -454,7 +394,6 @@ class MetricsCalculator:
                 'f1_score': agg['weighted_f1'] / w if w > 0 else 0.0
             }
         
-        # Analyze strengths and weaknesses
         strengths, weaknesses, suggestions = MetricsCalculator._analyze_performance(
             category_performance, severity_performance, overall_precision, overall_recall, overall_f1
         )
@@ -476,12 +415,10 @@ class MetricsCalculator:
     @staticmethod
     def _analyze_performance(category_perf: Dict, severity_perf: Dict, 
                            precision: float, recall: float, f1: float) -> Tuple[List[str], List[str], List[str]]:
-        """Analyze performance to identify strengths, weaknesses, and suggestions"""
         strengths = []
         weaknesses = []
         suggestions = []
         
-        # Overall performance analysis
         if f1 >= 0.8:
             strengths.append(f"Excellent overall performance (F1: {f1:.3f})")
         elif f1 >= 0.6:
@@ -490,7 +427,6 @@ class MetricsCalculator:
             weaknesses.append(f"Low overall performance (F1: {f1:.3f})")
             suggestions.append("Consider improving error detection patterns and training")
         
-        # Precision vs Recall balance
         if precision > recall + 0.2:
             strengths.append("High precision - few false positives")
             suggestions.append("Focus on improving recall to catch more issues")
@@ -500,7 +436,6 @@ class MetricsCalculator:
         elif abs(precision - recall) < 0.1:
             strengths.append("Well-balanced precision and recall")
         
-        # Category analysis
         best_categories = []
         worst_categories = []
         
@@ -517,7 +452,6 @@ class MetricsCalculator:
             weaknesses.append(f"Weak performance in: {', '.join(worst_categories)}")
             suggestions.append(f"Improve detection patterns for {', '.join([c.split(' (')[0] for c in worst_categories])}")
         
-        # Severity analysis
         for severity, scores in severity_perf.items():
             if severity == 'critical' and scores['recall'] < 0.8:
                 weaknesses.append(f"Missing critical issues (recall: {scores['recall']:.3f})")
@@ -529,71 +463,9 @@ class MetricsCalculator:
         return strengths, weaknesses, suggestions
 
 class EvaluationReporter:
-    """Generates evaluation reports and saves results"""
-    
-    @staticmethod
-    def generate_detailed_report(report: ModelPerformanceReport) -> str:
-        """Generate a detailed text report"""
-        lines = []
-        lines.append(f"# {report.model_name} Performance Report")
-        lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append("")
-        
-        # Overall metrics
-        lines.append("## Overall Performance")
-        lines.append(f"- **Test Cases**: {report.total_test_cases}")
-        lines.append(f"- **Precision**: {report.overall_precision:.3f}")
-        lines.append(f"- **Recall**: {report.overall_recall:.3f}")
-        lines.append(f"- **F1 Score**: {report.overall_f1_score:.3f}")
-        lines.append("")
-        
-        # Performance by category
-        if report.category_performance:
-            lines.append("## Performance by Error Category")
-            for category, scores in sorted(report.category_performance.items()):
-                lines.append(f"### {category.replace('_', ' ').title()}")
-                lines.append(f"- Precision: {scores['precision']:.3f}")
-                lines.append(f"- Recall: {scores['recall']:.3f}")
-                lines.append(f"- F1 Score: {scores['f1_score']:.3f}")
-                lines.append("")
-        
-        # Performance by severity
-        if report.severity_performance:
-            lines.append("## Performance by Error Severity")
-            for severity, scores in sorted(report.severity_performance.items()):
-                lines.append(f"### {severity.title()}")
-                lines.append(f"- Precision: {scores['precision']:.3f}")
-                lines.append(f"- Recall: {scores['recall']:.3f}")
-                lines.append(f"- F1 Score: {scores['f1_score']:.3f}")
-                lines.append("")
-        
-        # Strengths
-        if report.strengths:
-            lines.append("## Strengths")
-            for strength in report.strengths:
-                lines.append(f"- {strength}")
-            lines.append("")
-        
-        # Weaknesses
-        if report.weaknesses:
-            lines.append("## Areas for Improvement")
-            for weakness in report.weaknesses:
-                lines.append(f"- {weakness}")
-            lines.append("")
-        
-        # Suggestions
-        if report.improvement_suggestions:
-            lines.append("## Improvement Suggestions")
-            for suggestion in report.improvement_suggestions:
-                lines.append(f"- {suggestion}")
-            lines.append("")
-        
-        return "\n".join(lines)
     
     @staticmethod
     def save_results_json(report: ModelPerformanceReport, filepath: str):
-        """Save evaluation results as JSON"""
-        # Convert dataclass to dictionary for JSON serialization
         data = {
             "model_name": report.model_name,
             "timestamp": datetime.now().isoformat(),
@@ -627,7 +499,6 @@ class EvaluationReporter:
     
     @staticmethod
     def compare_models(reports: List[ModelPerformanceReport]) -> str:
-        """Generate comparison report between multiple models"""
         if len(reports) < 2:
             return "Need at least 2 models for comparison"
         
@@ -636,7 +507,6 @@ class EvaluationReporter:
         lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         lines.append("")
         
-        # Overall comparison table
         lines.append("## Overall Performance Comparison")
         lines.append("| Model | Precision | Recall | F1 Score |")
         lines.append("|-------|-----------|--------|----------|")
@@ -646,7 +516,6 @@ class EvaluationReporter:
                         f"{report.overall_recall:.3f} | {report.overall_f1_score:.3f} |")
         lines.append("")
         
-        # Best and worst performers
         best_model = max(reports, key=lambda r: r.overall_f1_score)
         worst_model = min(reports, key=lambda r: r.overall_f1_score)
         
@@ -654,7 +523,6 @@ class EvaluationReporter:
         lines.append(f"- **Best Overall**: {best_model.model_name} (F1: {best_model.overall_f1_score:.3f})")
         lines.append(f"- **Needs Improvement**: {worst_model.model_name} (F1: {worst_model.overall_f1_score:.3f})")
         
-        # Category winners
         all_categories = set()
         for report in reports:
             all_categories.update(report.category_performance.keys())

@@ -1,10 +1,3 @@
-"""
-PR Agent Evaluation System
-
-A comprehensive evaluation framework for measuring PR Agent performance
-using standardized Kubernetes test cases with known errors.
-"""
-
 from .test_cases import (
     KubernetesTestCases,
     TestCase,
@@ -29,14 +22,12 @@ from .runner import (
 
 __version__ = "1.0.0"
 __all__ = [
-    # Test Cases
     "KubernetesTestCases",
     "TestCase", 
     "KnownError",
     "ErrorCategory",
     "ErrorSeverity",
     
-    # Metrics
     "ErrorDetectionParser",
     "MetricsCalculator", 
     "DetectedError",
@@ -44,7 +35,6 @@ __all__ = [
     "ModelPerformanceReport",
     "EvaluationReporter",
     
-    # Runner
     "ModelEvaluationRunner",
     "QuickTestRunner"
 ]

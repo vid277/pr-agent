@@ -1,29 +1,27 @@
 import json
-import os
 import time
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass
+import openai
+import lancedb
+import pyarrow as pa
 import numpy as np
 from abc import ABC, abstractmethod
-
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass
+from pinecone import Pinecone, ServerlessSpec
 from pr_agent.algo.ai_handlers.base_ai_handler import BaseAiHandler
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.config_loader import get_settings
 from pr_agent.log import get_logger
-from pr_agent.tools.pr_diff_ingestion import PRDiffData
 
 
 @dataclass
 class RAGContext:
-    """Context retrieved from RAG system"""
-
     similar_diffs: List[Dict[str, Any]]
     similarity_scores: List[float]
     query_embedding: Optional[List[float]] = None
     learning_insights: Optional[List[Dict[str, Any]]] = None
 
     def get_formatted_context(self, max_context: int = 5) -> str:
-        """Format retrieved context for prompt inclusion"""
         context_parts = []
 
         for i, (diff_data, score) in enumerate(
@@ -48,79 +46,60 @@ class RAGContext:
 
 
 class VectorDatabase(ABC):
-    """Abstract base class for vector database implementations"""
-
     @abstractmethod
-    def add_documents(self, documents: List[PRDiffData]) -> bool:
-        """Add documents to the vector database"""
+    def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
         pass
 
     @abstractmethod
     def search(
         self, query_embedding: List[float], k: int = 5, document_type: str = None
     ) -> Tuple[List[Dict], List[float]]:
-        """Search for similar documents"""
         pass
 
     @abstractmethod
     def delete_by_hash(self, embedding_hash: str) -> bool:
-        """Delete document by embedding hash"""
         pass
 
     @abstractmethod
     def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics"""
         pass
 
 
 class LanceDBHandler(VectorDatabase):
-    """LanceDB implementation for vector storage"""
-
     def __init__(self, uri: str = None):
-        try:
-            import lancedb
-            import pyarrow as pa
-        except ImportError:
-            raise ImportError(
-                "Please install lancedb and pyarrow: pip install lancedb pyarrow"
-            )
-
         self.uri = uri or get_settings().lancedb.uri
         self.db = lancedb.connect(self.uri)
         self.table_name = "pr_diffs"
         self.logger = get_logger()
 
-        # Define schema (simplified)
-        self.schema = None  # Let LanceDB infer schema from data
+        self.schema = None
 
         self._ensure_table_exists()
 
     def _ensure_table_exists(self):
-        """Ensure the table exists with proper schema"""
         try:
             self.table = self.db.open_table(self.table_name)
         except FileNotFoundError:
-            # Table will be created when first data is added
             self.table = None
-            self.logger.info(f"Will create LanceDB table on first data insertion: {self.table_name}")
+            self.logger.info(
+                f"Will create LanceDB table on first data insertion: {self.table_name}"
+            )
         except Exception as e:
             self.logger.error(f"Error checking for table: {e}")
             self.table = None
 
-    def add_documents(self, documents: List[PRDiffData]) -> bool:
-        """Add PR diff documents to LanceDB"""
+    def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
         try:
-            # Convert to format suitable for LanceDB
             data_to_insert = []
 
             for doc in documents:
-                # Generate embedding for diff summary
                 embedding = self._generate_embedding(doc.diff_summary or "empty")
                 if embedding is None:
-                    self.logger.warning(f"Skipping document {doc.pr_id} - no embedding generated")
+                    self.logger.warning(
+                        f"Skipping document {doc.pr_id} - no embedding generated"
+                    )
                     continue
 
-                # Ensure all fields are non-null strings
                 record = {
                     "id": str(doc.pr_id or "unknown"),
                     "pr_url": str(doc.pr_url or ""),
@@ -133,18 +112,23 @@ class LanceDBHandler(VectorDatabase):
                     "embedding_hash": str(doc.embedding_hash or ""),
                     "vector": embedding,
                 }
-                
-                self.logger.debug(f"Adding record for PR {record['id']}: {record['title'][:50]}...")
+
+                self.logger.debug(
+                    f"Adding record for PR {record['id']}: {record['title'][:50]}..."
+                )
                 data_to_insert.append(record)
 
             if data_to_insert:
                 if self.table is None:
-                    # Create table with first data
                     self.table = self.db.create_table(self.table_name, data_to_insert)
-                    self.logger.info(f"Created LanceDB table with {len(data_to_insert)} documents")
+                    self.logger.info(
+                        f"Created LanceDB table with {len(data_to_insert)} documents"
+                    )
                 else:
                     self.table.add(data_to_insert)
-                    self.logger.info(f"Added {len(data_to_insert)} documents to LanceDB")
+                    self.logger.info(
+                        f"Added {len(data_to_insert)} documents to LanceDB"
+                    )
                 return True
 
             return False
@@ -156,14 +140,12 @@ class LanceDBHandler(VectorDatabase):
     def search(
         self, query_embedding: List[float], k: int = 5, document_type: str = None
     ) -> Tuple[List[Dict], List[float]]:
-        """Search for similar documents in LanceDB"""
         try:
             search_query = self.table.search(query_embedding).limit(k)
-            
-            # Add filter for document type if specified
+
             if document_type:
                 search_query = search_query.where(f"language = '{document_type}'")
-            
+
             results = search_query.to_pandas()
 
             documents = []
@@ -191,7 +173,6 @@ class LanceDBHandler(VectorDatabase):
             return [], []
 
     def delete_by_hash(self, embedding_hash: str) -> bool:
-        """Delete document by embedding hash"""
         try:
             self.table.delete(f"embedding_hash = '{embedding_hash}'")
             return True
@@ -200,7 +181,6 @@ class LanceDBHandler(VectorDatabase):
             return False
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics"""
         try:
             count = len(self.table.to_pandas())
             return {
@@ -213,17 +193,12 @@ class LanceDBHandler(VectorDatabase):
             return {}
 
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text using OpenAI"""
         try:
-            import openai
-
-            # Get OpenAI API key from settings
             openai_key = get_settings().openai.key
             if not openai_key:
                 self.logger.error("OpenAI API key not configured for embeddings")
                 return None
 
-            # Use OpenAI embeddings
             client = openai.OpenAI(api_key=openai_key)
             response = client.embeddings.create(
                 model="text-embedding-ada-002", input=text
@@ -236,41 +211,30 @@ class LanceDBHandler(VectorDatabase):
 
 
 class PineconeHandler(VectorDatabase):
-    """Pinecone implementation for vector storage"""
-
     def __init__(self):
-        try:
-            from pinecone import Pinecone, ServerlessSpec
-        except ImportError:
-            raise ImportError("Please install pinecone")
-
         self.logger = get_logger()
 
-        # Initialize Pinecone
         api_key = get_settings().pinecone.api_key
-        
+
         if not api_key:
             raise ValueError("Pinecone API key must be configured")
 
-        # Initialize the new Pinecone client
         self.pc = Pinecone(api_key=api_key)
 
         self.index_name = "pr-agent-diffs"
-        self.dimension = 1536  # OpenAI embedding dimension
+        self.dimension = 1536
 
-        # Create index if it doesn't exist
         if self.index_name not in [idx.name for idx in self.pc.list_indexes()]:
             self.pc.create_index(
-                name=self.index_name, 
-                dimension=self.dimension, 
+                name=self.index_name,
+                dimension=self.dimension,
                 metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1")
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
 
         self.index = self.pc.Index(self.index_name)
 
-    def add_documents(self, documents: List[PRDiffData]) -> bool:
-        """Add documents to Pinecone"""
+    def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
         try:
             vectors_to_upsert = []
 
@@ -288,7 +252,7 @@ class PineconeHandler(VectorDatabase):
                     "author": doc.author,
                     "created_at": doc.created_at,
                     "embedding_hash": doc.embedding_hash,
-                    "document_type": "pr_diff",  # Distinguish from learning insights
+                    "document_type": "pr_diff",
                 }
 
                 vectors_to_upsert.append((doc.embedding_hash, embedding, metadata))
@@ -307,23 +271,24 @@ class PineconeHandler(VectorDatabase):
             return False
 
     def add_learning_insights(self, insights: List[Dict[str, Any]]) -> bool:
-        """Add learning insights to Pinecone"""
         try:
             vectors_to_upsert = []
-            
+
             for insight in insights:
-                insight_text = insight.get('insight', '')
+                insight_text = insight.get("insight", "")
                 embedding = self._generate_embedding(insight_text)
                 if embedding is None:
                     continue
-                
-                insight_id = f"learning_{insight.get('pr_id', 'unknown')}_{hash(insight_text)}"
+
+                insight_id = (
+                    f"learning_{insight.get('pr_id', 'unknown')}_{hash(insight_text)}"
+                )
                 metadata = {
                     "document_type": "learning_insight",
                     "insight": insight_text,
-                    "pr_id": insight.get('pr_id', 'unknown'),
-                    "timestamp": insight.get('timestamp', ''),
-                    "agreement_score": insight.get('agreement_score', 0.0),
+                    "pr_id": insight.get("pr_id", "unknown"),
+                    "timestamp": insight.get("timestamp", ""),
+                    "agreement_score": insight.get("agreement_score", 0.0),
                     "title": f"Learning: {insight_text[:50]}...",
                     "language": "learning",
                     "author": "system",
@@ -332,16 +297,18 @@ class PineconeHandler(VectorDatabase):
                     "changed_files": "[]",
                     "embedding_hash": insight_id,
                 }
-                
+
                 vectors_to_upsert.append((insight_id, embedding, metadata))
-            
+
             if vectors_to_upsert:
                 self.index.upsert(vectors_to_upsert)
-                self.logger.info(f"Added {len(vectors_to_upsert)} learning insights to Pinecone")
+                self.logger.info(
+                    f"Added {len(vectors_to_upsert)} learning insights to Pinecone"
+                )
                 return True
-            
+
             return False
-            
+
         except Exception as e:
             self.logger.error(f"Failed to add learning insights to Pinecone: {e}")
             return False
@@ -349,17 +316,16 @@ class PineconeHandler(VectorDatabase):
     def search(
         self, query_embedding: List[float], k: int = 5, document_type: str = None
     ) -> Tuple[List[Dict], List[float]]:
-        """Search Pinecone for similar documents"""
         try:
             filter_dict = {}
             if document_type:
                 filter_dict["document_type"] = {"$eq": document_type}
-            
+
             results = self.index.query(
-                vector=query_embedding, 
-                top_k=k, 
+                vector=query_embedding,
+                top_k=k,
                 include_metadata=True,
-                filter=filter_dict if filter_dict else None
+                filter=filter_dict if filter_dict else None,
             )
 
             documents = []
@@ -381,7 +347,6 @@ class PineconeHandler(VectorDatabase):
             return [], []
 
     def delete_by_hash(self, embedding_hash: str) -> bool:
-        """Delete document by embedding hash"""
         try:
             self.index.delete(ids=[embedding_hash])
             return True
@@ -390,7 +355,6 @@ class PineconeHandler(VectorDatabase):
             return False
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get Pinecone index statistics"""
         try:
             stats = self.index.describe_index_stats()
             return {
@@ -403,11 +367,7 @@ class PineconeHandler(VectorDatabase):
             return {}
 
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text using OpenAI"""
         try:
-            import openai
-
-            # Get OpenAI API key from settings
             openai_key = get_settings().openai.key
             if not openai_key:
                 self.logger.error("OpenAI API key not configured for embeddings")
@@ -424,43 +384,41 @@ class PineconeHandler(VectorDatabase):
             return None
 
 
-
-
 class RAGHandler:
-    """Main RAG handler for PR diff similarity search"""
-
     def __init__(self, vector_db_type: str = "pinecone"):
         self.logger = get_logger()
         self.ai_handler = LiteLLMAIHandler()
 
-        # Initialize vector database - default to Pinecone for production
         if vector_db_type.lower() == "pinecone":
             self.vector_db = PineconeHandler()
         elif vector_db_type.lower() == "lancedb":
             self.vector_db = LanceDBHandler()
         else:
-            raise ValueError(f"Unsupported vector database type: {vector_db_type}. Use 'pinecone' or 'lancedb'")
+            raise ValueError(
+                f"Unsupported vector database type: {vector_db_type}. Use 'pinecone' or 'lancedb'"
+            )
 
         self.logger.info(f"Initialized RAG handler with {vector_db_type}")
 
-    def add_pr_diffs(self, pr_diffs: List[PRDiffData]) -> bool:
-        """Add PR diffs to the vector database"""
+    def add_pr_diffs(self, pr_diffs: List[Dict[str, Any]]) -> bool:
         return self.vector_db.add_documents(pr_diffs)
 
     def get_similar_contexts(
-        self, query_text: str, k: int = 5, language: str = None, include_learning: bool = True
+        self,
+        query_text: str,
+        k: int = 5,
+        language: str = None,
+        include_learning: bool = True,
     ) -> RAGContext:
-        """Get similar PR contexts for a given query"""
         try:
-            # Generate embedding for query
             query_embedding = self._generate_embedding(query_text)
             if query_embedding is None:
                 return RAGContext([], [])
 
-            # Search for similar documents (excluding learning insights)
-            documents, scores = self.vector_db.search(query_embedding, k, document_type="pr_diff")
+            documents, scores = self.vector_db.search(
+                query_embedding, k, document_type="pr_diff"
+            )
 
-            # Filter by language if specified
             if language:
                 filtered_docs = []
                 filtered_scores = []
@@ -470,7 +428,6 @@ class RAGHandler:
                         filtered_scores.append(score)
                 documents, scores = filtered_docs, filtered_scores
 
-            # Get relevant learning insights
             learning_insights = []
             if include_learning:
                 learning_insights = self.get_relevant_learning_insights(query_text)
@@ -489,7 +446,6 @@ class RAGHandler:
     def enhance_prompt_with_context(
         self, base_prompt: str, context: RAGContext, max_context: int = 3
     ) -> str:
-        """Enhance a prompt with RAG context"""
         if not context.similar_diffs:
             return base_prompt
 
@@ -503,45 +459,49 @@ class RAGHandler:
         return context_section + base_prompt
 
     def get_database_stats(self) -> Dict[str, Any]:
-        """Get statistics about the vector database"""
         return self.vector_db.get_stats()
 
     def _generate_embedding(self, text: str) -> Optional[List[float]]:
-        """Generate embedding for text"""
         return self.vector_db._generate_embedding(text)
 
-    def add_learning_insight(self, insight_text: str, pr_id: str, agreement_score: float = 0.0, metadata: Dict[str, Any] = None) -> bool:
-        """Add a single learning insight directly to the vector database"""
-        try:
-            insight_data = {
-                'insight': insight_text,
-                'pr_id': pr_id,
-                'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S.%fZ'),
-                'agreement_score': agreement_score,
-                **(metadata or {})
-            }
-            
-            success = self.add_learning_insights_to_rag([insight_data])
-            if success:
-                self.logger.info(f"Added learning insight for PR {pr_id}: {insight_text[:50]}...")
-            return success
-            
-        except Exception as e:
-            self.logger.error(f"Failed to add learning insight: {e}")
-            return False
+    def add_learning_insight(
+        self,
+        insight_text: str,
+        pr_id: str,
+        agreement_score: float = 0.0,
+        metadata: Dict[str, Any] = None,
+    ) -> bool:
+        insight_data = {
+            "insight": insight_text,
+            "pr_id": pr_id,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "agreement_score": agreement_score,
+            **(metadata or {}),
+        }
 
-    async def generate_insight_search_query(self, pr_title: str, pr_description: str, changed_files: List[str] = None, language: str = None) -> str:
-        """Use lightweight LLM to generate optimal search query for learning insights"""
-        try:
-            # Prepare context for the translation LLM
-            context = f"Title: {pr_title}\nDescription: {pr_description or 'No description'}"
-            if changed_files:
-                context += f"\nFiles: {', '.join(changed_files[:5])}"
-            if language:
-                context += f"\nLanguage: {language}"
-            
-            # Prompt for generating insight search terms
-            search_prompt = f"""Analyze this PR and generate search terms to find relevant code review learning insights.
+        success = self.add_learning_insights_to_rag([insight_data])
+        if success:
+            self.logger.info(
+                f"Added learning insight for PR {pr_id}: {insight_text[:50]}..."
+            )
+        return success
+
+    async def generate_insight_search_query(
+        self,
+        pr_title: str,
+        pr_description: str,
+        changed_files: List[str] = None,
+        language: str = None,
+    ) -> str:
+        context = (
+            f"Title: {pr_title}\nDescription: {pr_description or 'No description'}"
+        )
+        if changed_files:
+            context += f"\nFiles: {', '.join(changed_files[:5])}"
+        if language:
+            context += f"\nLanguage: {language}"
+
+        search_prompt = f"""Analyze this PR and generate search terms to find relevant code review learning insights.
 
 ## PR Context:
 {context}
@@ -563,202 +523,96 @@ Examples:
 
 Output only the search phrases, one per line, no explanations."""
 
-            # Use lightweight model for this translation task
-            response, _ = await self.ai_handler.chat_completion(
-                model="gpt-4o-mini",
-                temperature=0.1,
-                system="You are an expert at mapping specific code changes to general technical insight categories. Generate search terms that will find relevant learning patterns.",
-                user=search_prompt
-            )
-            
-            # Clean and combine the generated search terms
-            search_terms = []
-            for line in response.strip().split('\n'):
-                line = line.strip()
-                if len(line) > 10:  # Filter out short/empty lines
-                    search_terms.append(line)
-            
-            # Combine into a single search query
-            search_query = " ".join(search_terms[:3])  # Use up to 3 terms
-            
-            self.logger.info(f"Generated insight search query: {search_query}")
-            return search_query
-            
-        except Exception as e:
-            self.logger.error(f"Failed to generate insight search query: {e}")
-            # Fallback to basic PR title/description
-            return f"{pr_title} {pr_description or ''}"
+        response, _ = await self.ai_handler.chat_completion(
+            model="gpt-4o-mini",
+            temperature=0.1,
+            system="You are an expert at mapping specific code changes to general technical insight categories. Generate search terms that will find relevant learning patterns.",
+            user=search_prompt,
+        )
 
-    async def get_relevant_learning_insights_with_context(self, pr_title: str, pr_description: str = None, changed_files: List[str] = None, language: str = None, max_insights: int = 3) -> List[Dict[str, Any]]:
-        """Get learning insights using intelligent PR context analysis"""
-        try:
-            # Use LLM to generate optimal search query
-            search_query = await self.generate_insight_search_query(
-                pr_title=pr_title,
-                pr_description=pr_description,
-                changed_files=changed_files,
-                language=language
-            )
-            
-            # Use the generated query to search for insights
-            return self.get_relevant_learning_insights(search_query, max_insights)
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get learning insights with context: {e}")
-            # Fallback to simple search
-            fallback_query = f"{pr_title} {pr_description or ''}"
-            return self.get_relevant_learning_insights(fallback_query, max_insights)
+        search_terms = []
+        for line in response.strip().split("\n"):
+            line = line.strip()
+            if len(line) > 10:
+                search_terms.append(line)
 
-    def get_relevant_learning_insights(self, query_text: str, max_insights: int = 3) -> List[Dict[str, Any]]:
-        """Get learning insights relevant to the query using vector search"""
-        try:
-            # Generate embedding for query
-            query_embedding = self._generate_embedding(query_text)
-            if query_embedding is None:
-                self.logger.warning("Could not generate embedding for learning insights query")
-                return []
-            
-            # Search for similar learning insights
-            documents, scores = self.vector_db.search(
-                query_embedding, 
-                k=max_insights, 
-                document_type="learning_insight"
+        search_query = " ".join(search_terms[:3])
+        self.logger.info(f"Generated insight search query: {search_query}")
+        return search_query
+
+    async def get_relevant_learning_insights_with_context(
+        self,
+        pr_title: str,
+        pr_description: str = None,
+        changed_files: List[str] = None,
+        language: str = None,
+        max_insights: int = 3,
+    ) -> List[Dict[str, Any]]:
+        search_query = await self.generate_insight_search_query(
+            pr_title=pr_title,
+            pr_description=pr_description,
+            changed_files=changed_files,
+            language=language,
+        )
+
+        return self.get_relevant_learning_insights(search_query, max_insights)
+
+    def get_relevant_learning_insights(
+        self, query_text: str, max_insights: int = 3
+    ) -> List[Dict[str, Any]]:
+        query_embedding = self._generate_embedding(query_text)
+        if query_embedding is None:
+            self.logger.warning(
+                "Could not generate embedding for learning insights query"
             )
-            
-            # Convert to learning insight format
-            learning_insights = []
-            for doc, score in zip(documents, scores):
-                learning_insights.append({
-                    'insight': doc.get('insight', doc.get('diff_summary', '')),
-                    'pr_id': doc.get('pr_id', 'unknown'),
-                    'timestamp': doc.get('timestamp', ''),
-                    'agreement_score': doc.get('agreement_score', 0.0),
-                    'similarity_score': score
-                })
-            
-            return learning_insights
-            
-        except Exception as e:
-            self.logger.error(f"Failed to get relevant learning insights: {e}")
             return []
 
-    def add_learning_insights_to_rag(self, insights: List[Dict[str, Any]]) -> bool:
-        """Add learning insights to the RAG database as searchable content"""
-        try:
-            # Use Pinecone-specific method if available
-            if hasattr(self.vector_db, 'add_learning_insights'):
-                return self.vector_db.add_learning_insights(insights)
-            
-            # Fallback to general document addition
-            from pr_agent.tools.pr_diff_ingestion import PRDiffData
-            
-            learning_docs = []
-            for insight in insights:
-                # Create pseudo PR diff data for learning insights
-                doc = PRDiffData(
-                    pr_id=f"learning_{insight.get('pr_id', 'unknown')}_{hash(insight.get('insight', ''))}",
-                    pr_url="",
-                    title=f"Learning Insight: {insight.get('insight', '')[:50]}",
-                    diff_summary=f"Learning point: {insight.get('insight', '')}",
-                    language="learning",
-                    changed_files=[],
-                    author="system",
-                    created_at=insight.get('timestamp', ''),
-                    embedding_hash=f"learning_{hash(insight.get('insight', ''))}"
-                )
-                learning_docs.append(doc)
-            
-            if learning_docs:
-                return self.vector_db.add_documents(learning_docs)
-            return False
-            
-        except Exception as e:
-            self.logger.error(f"Failed to add learning insights to RAG: {e}")
-            return False
+        documents, scores = self.vector_db.search(
+            query_embedding, k=max_insights, document_type="learning_insight"
+        )
 
-
-    def get_learning_insights_stats(self) -> Dict[str, Any]:
-        """Get statistics about learning insights in the vector database"""
-        try:
-            # Try to get learning insights count
-            query_embedding = self._generate_embedding("learning insight")
-            if query_embedding:
-                documents, scores = self.vector_db.search(
-                    query_embedding, 
-                    k=1000,  # Large number to get all
-                    document_type="learning_insight"
-                )
-                return {
-                    "total_learning_insights": len(documents),
-                    "vector_db_type": type(self.vector_db).__name__,
-                    "sample_insights": len(documents[:3])
+        learning_insights = []
+        for doc, score in zip(documents, scores):
+            learning_insights.append(
+                {
+                    "insight": doc.get("insight", doc.get("diff_summary", "")),
+                    "pr_id": doc.get("pr_id", "unknown"),
+                    "timestamp": doc.get("timestamp", ""),
+                    "agreement_score": doc.get("agreement_score", 0.0),
+                    "similarity_score": score,
                 }
-            return {"error": "Could not generate embedding for stats"}
-        except Exception as e:
-            self.logger.error(f"Failed to get learning insights stats: {e}")
-            return {"error": str(e)}
+            )
+
+        return learning_insights
+
+    def add_learning_insights_to_rag(self, insights: List[Dict[str, Any]]) -> bool:
+        if hasattr(self.vector_db, "add_learning_insights"):
+            return self.vector_db.add_learning_insights(insights)
+
+        learning_docs = []
+        for insight in insights:
+            doc = {
+                "pr_id": f"learning_{insight.get('pr_id', 'unknown')}_{hash(insight.get('insight', ''))}",
+                "pr_url": "",
+                "title": f"Learning Insight: {insight.get('insight', '')[:50]}",
+                "diff_summary": f"Learning point: {insight.get('insight', '')}",
+                "language": "learning",
+                "changed_files": [],
+                "author": "system",
+                "created_at": insight.get("timestamp", ""),
+                "embedding_hash": f"learning_{hash(insight.get('insight', ''))}",
+            }
+            learning_docs.append(doc)
+
+        if learning_docs:
+            return self.vector_db.add_documents(learning_docs)
+        return False
 
 
 class HybridSearchRAG(RAGHandler):
-    """Enhanced RAG with hybrid search capabilities"""
-
     def __init__(self, vector_db_type: str = "lancedb"):
         super().__init__(vector_db_type)
         self.keyword_weight = 0.3
         self.semantic_weight = 0.7
-
-    def hybrid_search(
-        self, query_text: str, k: int = 5, language: str = None
-    ) -> RAGContext:
-        """Perform hybrid search combining semantic and keyword matching"""
-        # For now, use semantic search only
-        # TODO: Implement keyword search and score fusion
-        return self.get_similar_contexts(query_text, k, language)
-
-    def get_context_for_pr_analysis(
-        self, pr_title: str, pr_description: str, diff_text: str, language: str = None
-    ) -> RAGContext:
-        """Get context specifically for PR analysis"""
-        # Combine PR information for better context retrieval
-        query_text = f"Title: {pr_title}\nDescription: {pr_description}\nDiff preview: {diff_text[:500]}"
-
-        return self.hybrid_search(query_text, k=5, language=language)
-
-
-def main():
-    """Example usage of the RAG handler with real-time learning insights"""
-    # Initialize with Pinecone for production
-    rag = RAGHandler("pinecone")
-
-    # Get database stats
-    stats = rag.get_database_stats()
-    print(f"Database stats: {stats}")
-
-    # Add a new learning insight in real-time
-    print("\nAdding new learning insight...")
-    success = rag.add_learning_insight(
-        insight_text="Always check for proper input validation in authentication endpoints",
-        pr_id="example-pr-123",
-        agreement_score=0.9
-    )
-    print(f"Learning insight added: {success}")
-
-    # Get learning insights stats
-    learning_stats = rag.get_learning_insights_stats()
-    print(f"Learning insights stats: {learning_stats}")
-
-    # Example search with learning insights
-    context = rag.get_similar_contexts("Fix authentication bug in login system", k=3, include_learning=True)
-    print(f"Found {len(context.similar_diffs)} similar contexts and {len(context.learning_insights or [])} learning insights")
-
-    # Example prompt enhancement with learning
-    base_prompt = "Review this PR for potential issues:"
-    enhanced_prompt = rag.enhance_prompt_with_context(base_prompt, context)
-    print(f"Enhanced prompt length: {len(enhanced_prompt)} characters")
-    
-    if context.learning_insights:
-        print("✓ Learning insights included in context")
-
-
-if __name__ == "__main__":
-    main()
+        self.semantic_weight = 0.7
+        self.semantic_weight = 0.7

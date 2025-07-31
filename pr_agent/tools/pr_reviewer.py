@@ -164,7 +164,13 @@ class PRReviewer:
                 reason = "Review output is not published"
                 if get_settings().config.publish_output:
                     reason += ": no major issues detected."
+                else:
+                    reason += " (publish_output=false)"
                 get_logger().info(reason)
+                get_logger().info("=== PR REVIEW OUTPUT ===")
+                print("=== PR REVIEW OUTPUT ===")
+                print(pr_review)
+                print("=== END PR REVIEW ===")
                 get_settings().data = {"artifact": pr_review}
                 return
 
@@ -215,6 +221,18 @@ class PRReviewer:
         environment = Environment(undefined=StrictUndefined)
         system_prompt = environment.from_string(get_settings().pr_review_prompt.system).render(variables)
         user_prompt = environment.from_string(get_settings().pr_review_prompt.user).render(variables)
+
+        from pr_agent.dicl.sdk import DICL
+        pr_data = {"title": variables.get("title", ""), "description": variables.get("description", ""), 
+                   "changed_files": self.git_provider.get_files(), "language": variables.get("language", "")}
+        original_prompt_length = len(user_prompt)
+        user_prompt = DICL.regular(pr_data, user_prompt)
+        enhanced_prompt_length = len(user_prompt)
+        get_logger().info(f"DICL enhanced prompt: +{enhanced_prompt_length - original_prompt_length} chars")
+        get_logger().debug(f"Enhanced user prompt:\n{user_prompt}")
+        print("=== USER PROMPT (DICL ENHANCED) ===")
+        print(user_prompt)
+        print("=== END PROMPTS ===\n")
 
         response, finish_reason = await self.ai_handler.chat_completion(
             model=model,
