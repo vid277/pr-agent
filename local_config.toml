@@ -1,0 +1,4 @@
+[config]
+publish_output=false
+log_level="DEBUG"
+verbosity_level=2
