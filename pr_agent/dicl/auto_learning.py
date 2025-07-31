@@ -87,54 +87,40 @@ class AutoLearningEngine:
             for existing in issue_list
         )
 
-    def gen_insights(
+    async def gen_insights(
         self, comparison: ModelComparison, pr_context: Dict[str, Any]
     ) -> List[str]:
         if not comparison.gpt4_review or not comparison.o3_review:
             return []
 
         if not comparison.gpt4_review.strip() or not comparison.o3_review.strip():
-            self.logger.info("No substantial reviews from either model, skipping insight generation")
-            return []
-
-        try:
-            try:
-                asyncio.get_running_loop()
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        self.gen_insights_with_judge(comparison, pr_context),
-                    )
-                    insights = future.result(timeout=30)
-            except RuntimeError:
-                insights = asyncio.run(
-                    self.gen_insights_with_judge(comparison, pr_context)
-                )
-
-            quality_insights = [
-                insight
-                for insight in insights
-                if len(insight) > 50
-                and not any(
-                    term in insight.lower()
-                    for term in [
-                        "gpt-4",
-                        "o3",
-                        "model",
-                        "correctly identified",
-                        "missed",
-                    ]
-                )
-            ]
-
             self.logger.info(
-                f"LLM Judge generated {len(insights)} insights, {len(quality_insights)} passed quality filter"
+                "No substantial reviews from either model, skipping insight generation"
             )
-            return quality_insights
-
-        except Exception as e:
-            self.logger.error(f"LLM Judge failed: {e}")
             return []
+
+        insights = await self.gen_insights_with_judge(comparison, pr_context)
+
+        quality_insights = [
+            insight
+            for insight in insights
+            if len(insight) > 50
+            and not any(
+                term in insight.lower()
+                for term in [
+                    "gpt-4",
+                    "o3",
+                    "model",
+                    "correctly identified",
+                    "missed",
+                ]
+            )
+        ]
+
+        self.logger.info(
+            f"LLM Judge generated {len(insights)} insights, {len(quality_insights)} passed quality filter"
+        )
+        return quality_insights
 
     async def gen_insights_with_judge(
         self, comparison: ModelComparison, pr_context: Dict[str, Any]
@@ -197,32 +183,28 @@ Create instructions that directly improve future review capabilities by teaching
         if not insights:
             self.logger.info("No insights to store, skipping RAG initialization")
             return False
-            
-        try:
-            rag = RAGHandler()
-            stored_count = sum(
-                1
-                for insight in insights
-                if rag.add_learning_insight(
-                    insight_text=insight,
-                    pr_id=pr_context.get("pr_id", "auto_learning"),
-                    agreement_score=0.8,
-                    metadata={
-                        "learning_type": "automated_comparison",
-                        "timestamp": datetime.now().isoformat(),
-                        "pr_language": pr_context.get("language", "unknown"),
-                        "pr_files": pr_context.get("changed_files", [])[:10],
-                        "automated": True,
-                    },
-                )
+
+        rag = RAGHandler()
+        stored_count = sum(
+            1
+            for insight in insights
+            if rag.add_learning_insight(
+                insight_text=insight,
+                pr_id=pr_context.get("pr_id", "auto_learning"),
+                agreement_score=0.8,
+                metadata={
+                    "learning_type": "automated_comparison",
+                    "timestamp": datetime.now().isoformat(),
+                    "pr_language": pr_context.get("language", "unknown"),
+                    "pr_files": pr_context.get("changed_files", [])[:10],
+                    "automated": True,
+                },
             )
-            self.logger.info(
-                f"Stored {stored_count}/{len(insights)} automated learning insights"
-            )
-            return stored_count > 0
-        except Exception as e:
-            self.logger.error(f"Failed to store automated learning: {e}")
-            return False
+        )
+        self.logger.info(
+            f"Stored {stored_count}/{len(insights)} automated learning insights"
+        )
+        return stored_count > 0
 
 
 class DualModelReviewer:
@@ -249,7 +231,7 @@ class DualModelReviewer:
         o3_review = await self.get_o3_review(pr_data, enhanced_prompts["o3"])
 
         comparison = self.learning_engine.compare_models(gpt4_review, o3_review)
-        insights = self.learning_engine.gen_insights(comparison, pr_data)
+        insights = await self.learning_engine.gen_insights(comparison, pr_data)
         self.learning_engine.store_insights(insights, pr_data)
 
         final_review = self.synthesize_reviews(gpt4_review, o3_review, comparison)
@@ -262,11 +244,7 @@ class DualModelReviewer:
     async def get_new_prompts(
         self, pr_data: Dict[str, Any], base_prompt: str
     ) -> Dict[str, str]:
-        try:
-            rag = RAGHandler()
-        except Exception as e:
-            self.logger.warning(f"Failed to initialize RAG handler: {e}")
-            return {"gpt4": base_prompt, "o3": base_prompt}
+        rag = RAGHandler()
         insights = await rag.get_relevant_learning_insights_with_context(
             pr_title=pr_data.get("title", ""),
             pr_description=pr_data.get("description", ""),

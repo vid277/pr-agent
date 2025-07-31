@@ -4,6 +4,7 @@ import asyncio
 from pr_agent.algo.rag_handler import RAGHandler
 import concurrent.futures
 
+
 class DICL:
     @staticmethod
     async def evolve(pr_data: Dict[str, Any], base_prompt: str) -> str:
@@ -23,47 +24,19 @@ class DICL:
         return enhanced_review
 
     @staticmethod
-    def regular(pr_data: Dict[str, Any], base_prompt: str) -> str:
-        try:
-            rag = RAGHandler()
-            title = pr_data.get("title", "")
-            description = pr_data.get("description", "")
-            changed_files = pr_data.get("changed_files", [])
-            language = pr_data.get("language", None)
+    async def regular(pr_data: Dict[str, Any], base_prompt: str) -> str:
+        rag = RAGHandler()
+        title = pr_data.get("title", "")
+        description = pr_data.get("description", "")
+        changed_files = pr_data.get("changed_files", [])
+        language = pr_data.get("language", None)
 
-            try:
-                asyncio.get_running_loop()
-
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        rag.get_relevant_learning_insights_with_context(
-                            pr_title=title,
-                            pr_description=description,
-                            changed_files=changed_files,
-                            language=language,
-                        ),
-                    )
-                    insights = future.result(timeout=15)
-            except RuntimeError:
-                insights = asyncio.run(
-                    rag.get_relevant_learning_insights_with_context(
-                        pr_title=title,
-                        pr_description=description,
-                        changed_files=changed_files,
-                        language=language,
-                    )
-                )
-            except Exception:
-                search_query = f"{title} {description}"
-                if changed_files:
-                    search_query += f" {' '.join(changed_files[:3])}"
-                if language:
-                    search_query += f" {language}"
-                insights = rag.get_relevant_learning_insights(search_query)
-
-        except Exception:
-            return base_prompt
+        insights = await rag.get_relevant_learning_insights_with_context(
+            pr_title=title,
+            pr_description=description,
+            changed_files=changed_files,
+            language=language,
+        )
 
         if not insights:
             return base_prompt
