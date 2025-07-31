@@ -1,6 +1,12 @@
 from typing import Dict, List, Any, Tuple
 from datetime import datetime
 from dataclasses import dataclass
+import asyncio
+from pr_agent.log import get_logger
+import concurrent.futures
+from pr_agent.log import get_logger
+from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
+from pr_agent.algo.rag_handler import RAGHandler
 
 
 @dataclass
@@ -20,13 +26,12 @@ class ModelComparison:
 
 class AutoLearningEngine:
     def __init__(self):
-        from pr_agent.log import get_logger
-
         self.logger = get_logger()
 
     def compare_models(self, gpt4_review: str, o3_review: str) -> ModelComparison:
         gpt4_issues = self._extract_issues(gpt4_review)
         o3_issues = self._extract_issues(o3_review)
+
         unique_to_gpt4 = [
             issue
             for issue in gpt4_issues
@@ -37,16 +42,15 @@ class AutoLearningEngine:
             for issue in o3_issues
             if not self._similar_issue_exists(issue, gpt4_issues)
         ]
+
         common_issues = (
             len(gpt4_issues) + len(o3_issues) - len(unique_to_gpt4) - len(unique_to_o3)
         )
         total_issues = len(gpt4_issues) + len(o3_issues)
 
-        if total_issues == 0:
-            agreement_score = 1.0
-        else:
-            agreement_score = min(1.0, (2 * common_issues) / total_issues)
-
+        agreement_score = (
+            1.0 if total_issues == 0 else min(1.0, (2 * common_issues) / total_issues)
+        )
         differences = unique_to_gpt4 + unique_to_o3
 
         return ModelComparison(
@@ -60,27 +64,26 @@ class AutoLearningEngine:
 
     def _extract_issues(self, review_text: str) -> List[str]:
         issues = []
-        lines = review_text.split("\n")
+        indicators = [
+            "issue:",
+            "problem:",
+            "concern:",
+            "warning:",
+            "error:",
+            "missing:",
+            "should:",
+            "consider:",
+            "recommend:",
+            "fix:",
+        ]
 
-        for line in lines:
+        for line in review_text.split("\n"):
             line = line.strip()
-            if any(
-                indicator in line.lower()
-                for indicator in [
-                    "issue:",
-                    "problem:",
-                    "concern:",
-                    "warning:",
-                    "error:",
-                    "missing:",
-                    "should:",
-                    "consider:",
-                    "recommend:",
-                    "fix:",
-                ]
+            if (
+                any(indicator in line.lower() for indicator in indicators)
+                and len(line) > 10
             ):
-                if len(line) > 10:
-                    issues.append(line[:200])
+                issues.append(line[:200])
 
         return issues
 
@@ -101,24 +104,18 @@ class AutoLearningEngine:
         if not comparison.gpt4_review or not comparison.o3_review:
             return []
 
-        if comparison.agreement_score > 0.8:
+        if (
+            comparison.agreement_score > 0.95
+            and len(comparison.unique_to_gpt4) == 0
+            and len(comparison.unique_to_o3) == 0
+        ):
             self.logger.info(
-                f"High agreement ({comparison.agreement_score:.2f}), skipping insight generation"
+                f"Near-perfect agreement ({comparison.agreement_score:.2f}) with no unique findings, skipping insight generation"
             )
             return []
-
-        if len(comparison.unique_to_gpt4) < 1 and len(comparison.unique_to_o3) < 1:
-            self.logger.info(
-                "No unique findings between models, skipping insight generation"
-            )
-            return []
-
         try:
-            import asyncio
-
             try:
                 asyncio.get_running_loop()
-                import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
@@ -143,17 +140,13 @@ class AutoLearningEngine:
 
     def filter_quality_insights(self, insights: List[str]) -> List[str]:
         quality_insights = []
+        exclude_terms = ["gpt-4", "o3", "model", "correctly identified", "missed"]
 
         for insight in insights:
             if len(insight) < 50:
                 continue
-
-            if any(
-                term in insight.lower()
-                for term in ["gpt-4", "o3", "model", "correctly identified", "missed"]
-            ):
+            if any(term in insight.lower() for term in exclude_terms):
                 continue
-
             quality_insights.append(insight)
 
         return quality_insights
@@ -161,7 +154,6 @@ class AutoLearningEngine:
     async def _generate_insights_with_judge(
         self, comparison: ModelComparison, pr_context: Dict[str, Any]
     ) -> List[str]:
-        from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 
         judge_prompt = f"""Analyze these two code reviews to extract direct learning instructions for improving future reviews.
 
@@ -223,8 +215,6 @@ Create instructions that directly improve future review capabilities by teaching
         self, insights: List[str], pr_context: Dict[str, Any]
     ) -> bool:
         try:
-            from pr_agent.algo.rag_handler import RAGHandler
-
             rag = RAGHandler()
             stored_count = 0
 
@@ -257,7 +247,6 @@ Create instructions that directly improve future review capabilities by teaching
 class DualModelReviewer:
     def __init__(self):
         self.learning_engine = AutoLearningEngine()
-        from pr_agent.log import get_logger
 
         self.logger = get_logger()
 
@@ -283,11 +272,9 @@ class DualModelReviewer:
 
         comparison = self.learning_engine.compare_models(gpt4_review, o3_review)
         insights = self.learning_engine.generate_learning_insights(comparison, pr_data)
-
         self.learning_engine.store_learning_insights(insights, pr_data)
 
         final_review = self.synthesize_reviews(gpt4_review, o3_review, comparison)
-
         self.logger.info(
             f"Dual model review completed. Agreement: {comparison.agreement_score:.2f}, New insights: {len(insights)}"
         )
@@ -297,9 +284,9 @@ class DualModelReviewer:
     async def get_enhanced_prompts_with_insights(
         self, pr_data: Dict[str, Any], base_prompt: str
     ) -> Dict[str, str]:
-        from pr_agent.algo.rag_handler import RAGHandler
 
         rag = RAGHandler()
+
         insights = await rag.get_relevant_learning_insights_with_context(
             pr_title=pr_data.get("title", ""),
             pr_description=pr_data.get("description", ""),
@@ -326,31 +313,33 @@ class DualModelReviewer:
         if not insights:
             return ""
 
-        learning_section = (
-            "\n## 🧠 LEARNING PATTERNS\n**Apply these proven detection methods:**\n\n"
-        )
+        high_relevance_insights = []
+        for insight in insights:
+            if isinstance(insight, dict) and "similarity_score" in insight:
+                if insight.get("similarity_score", 0.0) > 0.85:
+                    high_relevance_insights.append(insight)
+            else:
+                high_relevance_insights.append(insight)
 
-        for i, insight in enumerate(insights[:3], 1):
+        if not high_relevance_insights:
+            return ""
+
+        learning_section = "\n## 🧠 LEARNING PATTERNS\n**Apply these proven detection methods ONLY if clearly relevant:**\n\n"
+
+        for i, insight in enumerate(high_relevance_insights[:2], 1):  # Limit to top 2
             if isinstance(insight, dict) and "insight" in insight:
-                insight_text = (
-                    insight["insight"][:200] + "..."
-                    if len(insight["insight"]) > 200
-                    else insight["insight"]
-                )
+                insight_text = insight["insight"]
                 score = insight.get("similarity_score", 0.0)
                 learning_section += f"**{i}.** ({score:.2f}) {insight_text}\n\n"
             elif isinstance(insight, str):
-                insight_text = insight[:200] + "..." if len(insight) > 200 else insight
-                learning_section += f"**{i}.** {insight_text}\n\n"
+                learning_section += f"**{i}.** {insight}\n\n"
 
         return (
             learning_section
-            + "**🎯 APPLY:** Look for these patterns and reference line numbers when found.\n\n"
+            + "**🎯 CRITICAL:** Only apply patterns that clearly match this specific code. If patterns don't apply, ignore them completely.\n\n"
         )
 
     async def get_gpt4_review(self, _: Dict[str, Any], prompt: str) -> str:
-        from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
-
         ai_handler = LiteLLMAIHandler()
         response, _ = await ai_handler.chat_completion(
             model="gpt-4",
@@ -384,8 +373,6 @@ Focus on genuine problems that impact security, reliability, or functionality. L
         return response
 
     async def get_o3_review(self, _: Dict[str, Any], prompt: str) -> str:
-        from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
-
         ai_handler = LiteLLMAIHandler()
         response, _ = await ai_handler.chat_completion(
             model="o3-mini",
