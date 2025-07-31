@@ -77,22 +77,39 @@ class VectorDatabase:
         try:
             vectors_to_upsert = []
             for doc in documents:
-                embedding = self._generate_embedding(doc.diff_summary)
+                diff_summary = (
+                    doc.get("diff_summary")
+                    if isinstance(doc, dict)
+                    else getattr(doc, "diff_summary", "")
+                )
+                embedding = self._generate_embedding(diff_summary)
                 if embedding is None:
                     continue
 
-                metadata = {
-                    "pr_url": doc.pr_url,
-                    "title": doc.title,
-                    "diff_summary": doc.diff_summary,
-                    "language": doc.language,
-                    "changed_files": json.dumps(doc.changed_files),
-                    "author": doc.author,
-                    "created_at": doc.created_at,
-                    "embedding_hash": doc.embedding_hash,
-                    "document_type": "pr_diff",
-                }
-                vectors_to_upsert.append((doc.embedding_hash, embedding, metadata))
+                if isinstance(doc, dict):
+                    metadata = {
+                        "pr_url": doc.get("pr_url", ""),
+                        "title": doc.get("title", ""),
+                        "diff_summary": doc.get("diff_summary", ""),
+                        "language": doc.get("language", ""),
+                        "changed_files": json.dumps(doc.get("changed_files", [])),
+                        "author": doc.get("author", ""),
+                        "created_at": doc.get("created_at", ""),
+                    }
+                    vector_id = f"doc_{hash(str(doc))}"
+                else:
+                    metadata = {
+                        "pr_url": getattr(doc, "pr_url", ""),
+                        "title": getattr(doc, "title", ""),
+                        "diff_summary": getattr(doc, "diff_summary", ""),
+                        "language": getattr(doc, "language", ""),
+                        "changed_files": json.dumps(getattr(doc, "changed_files", [])),
+                        "author": getattr(doc, "author", ""),
+                        "created_at": getattr(doc, "created_at", ""),
+                    }
+                    vector_id = f"doc_{hash(str(doc))}"
+
+                vectors_to_upsert.append((vector_id, embedding, metadata))
 
             if vectors_to_upsert:
                 self.index.upsert(vectors_to_upsert)
@@ -106,18 +123,13 @@ class VectorDatabase:
             return False
 
     def search(
-        self, query_embedding: List[float], k: int = 5, document_type: str = None
+        self, query_embedding: List[float], k: int = 5
     ) -> Tuple[List[Dict], List[float]]:
         try:
-            filter_dict = {}
-            if document_type:
-                filter_dict["document_type"] = {"$eq": document_type}
-
             results = self.index.query(
                 vector=query_embedding,
                 top_k=k,
                 include_metadata=True,
-                filter=filter_dict if filter_dict else None,
             )
 
             documents = []
@@ -172,7 +184,7 @@ class RAGHandler:
                 return RAGContext([], [])
 
             documents, scores = self.vector_db.search(
-                query_embedding, k, document_type="pr_diff"
+                query_embedding, k
             )
 
             if language:
@@ -231,31 +243,7 @@ class RAGHandler:
         }
         return self.add_learning_insights_to_rag([insight_data])
 
-    def get_relevant_learning_insights(
-        self, query_text: str, max_insights: int = 3
-    ) -> List[Dict[str, Any]]:
-        query_embedding = self.vector_db._generate_embedding(query_text)
-        if query_embedding is None:
-            return []
-
-        documents, scores = self.vector_db.search(
-            query_embedding, k=max_insights, document_type="learning_insight"
-        )
-
-        learning_insights = []
-        for doc, score in zip(documents, scores):
-            learning_insights.append(
-                {
-                    "insight": doc.get("insight", doc.get("diff_summary", "")),
-                    "pr_id": doc.get("pr_id", "unknown"),
-                    "timestamp": doc.get("timestamp", ""),
-                    "agreement_score": doc.get("agreement_score", 0.0),
-                    "similarity_score": score,
-                }
-            )
-        return learning_insights
-
-    async def generate_insight_search_query(
+    async def gen_search_query(
         self,
         pr_title: str,
         pr_description: str,
@@ -315,16 +303,41 @@ Output only the search phrases, one per line, no explanations."""
         pr_description: str = None,
         changed_files: List[str] = None,
         language: str = None,
-        max_insights: int = 3,
     ) -> List[Dict[str, Any]]:
-        search_query = await self.generate_insight_search_query(
+        search_query = await self.gen_search_query(
             pr_title=pr_title,
             pr_description=pr_description,
             changed_files=changed_files,
             language=language,
         )
 
-        return self.get_relevant_learning_insights(search_query, max_insights)
+        return self.get_relevant_learning_insights(search_query, 5)
+
+    def get_relevant_learning_insights(
+        self,
+        query_text: str,
+        max_insights: int = 8,
+    ) -> List[Dict[str, Any]]:
+        query_embedding = self.vector_db._generate_embedding(query_text)
+        if query_embedding is None:
+            return []
+
+        documents, scores = self.vector_db.search(
+            query_embedding, k=max_insights
+        )
+
+        learning_insights = []
+        for doc, score in zip(documents, scores):
+            learning_insights.append(
+                {
+                    "insight": doc.get("insight", doc.get("diff_summary", "")),
+                    "pr_id": doc.get("pr_id", "unknown"),
+                    "timestamp": doc.get("timestamp", ""),
+                    "agreement_score": doc.get("agreement_score", 0.0),
+                    "similarity_score": score,
+                }
+            )
+        return learning_insights
 
     def add_learning_insights_to_rag(self, insights: List[Dict[str, Any]]) -> bool:
         learning_docs = []
@@ -338,7 +351,6 @@ Output only the search phrases, one per line, no explanations."""
                 "changed_files": [],
                 "author": "system",
                 "created_at": insight.get("timestamp", ""),
-                "embedding_hash": f"learning_{hash(insight.get('insight', ''))}",
             }
             learning_docs.append(doc)
 

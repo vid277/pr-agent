@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import asyncio
 from pr_agent.log import get_logger
 import concurrent.futures
-from pr_agent.log import get_logger
 from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
 from pr_agent.algo.rag_handler import RAGHandler
 
@@ -51,19 +50,17 @@ class AutoLearningEngine:
         agreement_score = (
             1.0 if total_issues == 0 else min(1.0, (2 * common_issues) / total_issues)
         )
-        differences = unique_to_gpt4 + unique_to_o3
 
         return ModelComparison(
             gpt4_review=gpt4_review,
             o3_review=o3_review,
-            differences=differences,
+            differences=unique_to_gpt4 + unique_to_o3,
             unique_to_gpt4=unique_to_gpt4,
             unique_to_o3=unique_to_o3,
             agreement_score=agreement_score,
         )
 
     def _extract_issues(self, review_text: str) -> List[str]:
-        issues = []
         indicators = [
             "issue:",
             "problem:",
@@ -76,59 +73,60 @@ class AutoLearningEngine:
             "recommend:",
             "fix:",
         ]
-
-        for line in review_text.split("\n"):
-            line = line.strip()
-            if (
-                any(indicator in line.lower() for indicator in indicators)
-                and len(line) > 10
-            ):
-                issues.append(line[:200])
-
-        return issues
+        return [
+            line[:200]
+            for line in review_text.split("\n")
+            if any(indicator in line.strip().lower() for indicator in indicators)
+            and len(line.strip()) > 10
+        ]
 
     def _similar_issue_exists(self, issue: str, issue_list: List[str]) -> bool:
-        issue_lower = issue.lower()
-        key_words = [word for word in issue_lower.split() if len(word) > 3]
+        key_words = [word for word in issue.lower().split() if len(word) > 3]
+        return any(
+            sum(1 for word in key_words if word in existing.lower()) >= 2
+            for existing in issue_list
+        )
 
-        for existing_issue in issue_list:
-            existing_lower = existing_issue.lower()
-            overlap = sum(1 for word in key_words if word in existing_lower)
-            if overlap >= 2:
-                return True
-        return False
-
-    def generate_learning_insights(
+    def gen_insights(
         self, comparison: ModelComparison, pr_context: Dict[str, Any]
     ) -> List[str]:
         if not comparison.gpt4_review or not comparison.o3_review:
             return []
 
-        if (
-            comparison.agreement_score > 0.95
-            and len(comparison.unique_to_gpt4) == 0
-            and len(comparison.unique_to_o3) == 0
-        ):
-            self.logger.info(
-                f"Near-perfect agreement ({comparison.agreement_score:.2f}) with no unique findings, skipping insight generation"
-            )
+        if not comparison.gpt4_review.strip() or not comparison.o3_review.strip():
+            self.logger.info("No substantial reviews from either model, skipping insight generation")
             return []
+
         try:
             try:
                 asyncio.get_running_loop()
-
                 with concurrent.futures.ThreadPoolExecutor() as executor:
                     future = executor.submit(
                         asyncio.run,
-                        self._generate_insights_with_judge(comparison, pr_context),
+                        self.gen_insights_with_judge(comparison, pr_context),
                     )
                     insights = future.result(timeout=30)
             except RuntimeError:
                 insights = asyncio.run(
-                    self._generate_insights_with_judge(comparison, pr_context)
+                    self.gen_insights_with_judge(comparison, pr_context)
                 )
 
-            quality_insights = self.filter_quality_insights(insights)
+            quality_insights = [
+                insight
+                for insight in insights
+                if len(insight) > 50
+                and not any(
+                    term in insight.lower()
+                    for term in [
+                        "gpt-4",
+                        "o3",
+                        "model",
+                        "correctly identified",
+                        "missed",
+                    ]
+                )
+            ]
+
             self.logger.info(
                 f"LLM Judge generated {len(insights)} insights, {len(quality_insights)} passed quality filter"
             )
@@ -138,23 +136,9 @@ class AutoLearningEngine:
             self.logger.error(f"LLM Judge failed: {e}")
             return []
 
-    def filter_quality_insights(self, insights: List[str]) -> List[str]:
-        quality_insights = []
-        exclude_terms = ["gpt-4", "o3", "model", "correctly identified", "missed"]
-
-        for insight in insights:
-            if len(insight) < 50:
-                continue
-            if any(term in insight.lower() for term in exclude_terms):
-                continue
-            quality_insights.append(insight)
-
-        return quality_insights
-
-    async def _generate_insights_with_judge(
+    async def gen_insights_with_judge(
         self, comparison: ModelComparison, pr_context: Dict[str, Any]
     ) -> List[str]:
-
         judge_prompt = f"""Analyze these two code reviews to extract direct learning instructions for improving future reviews.
 
 ## Context
@@ -203,23 +187,23 @@ Create instructions that directly improve future review capabilities by teaching
             user=judge_prompt,
         )
 
-        insights = []
-        for line in response.strip().split("\n"):
-            line = line.strip()
-            if len(line) > 40:
-                insights.append(line)
+        return [
+            line.strip()
+            for line in response.strip().split("\n")
+            if len(line.strip()) > 40
+        ]
 
-        return insights
-
-    def store_learning_insights(
-        self, insights: List[str], pr_context: Dict[str, Any]
-    ) -> bool:
+    def store_insights(self, insights: List[str], pr_context: Dict[str, Any]) -> bool:
+        if not insights:
+            self.logger.info("No insights to store, skipping RAG initialization")
+            return False
+            
         try:
             rag = RAGHandler()
-            stored_count = 0
-
-            for insight in insights:
-                success = rag.add_learning_insight(
+            stored_count = sum(
+                1
+                for insight in insights
+                if rag.add_learning_insight(
                     insight_text=insight,
                     pr_id=pr_context.get("pr_id", "auto_learning"),
                     agreement_score=0.8,
@@ -231,14 +215,11 @@ Create instructions that directly improve future review capabilities by teaching
                         "automated": True,
                     },
                 )
-                if success:
-                    stored_count += 1
-
+            )
             self.logger.info(
                 f"Stored {stored_count}/{len(insights)} automated learning insights"
             )
             return stored_count > 0
-
         except Exception as e:
             self.logger.error(f"Failed to store automated learning: {e}")
             return False
@@ -247,15 +228,12 @@ Create instructions that directly improve future review capabilities by teaching
 class DualModelReviewer:
     def __init__(self):
         self.learning_engine = AutoLearningEngine()
-
         self.logger = get_logger()
 
-    async def dual_review_with_learning(
+    async def dual_review(
         self, pr_data: Dict[str, Any], base_prompt: str
     ) -> Tuple[str, int]:
-        enhanced_prompts = await self.get_enhanced_prompts_with_insights(
-            pr_data, base_prompt
-        )
+        enhanced_prompts = await self.get_new_prompts(pr_data, base_prompt)
 
         print("\n" + "=" * 120)
         print("===== GPT-4 PROMPT: =====")
@@ -271,8 +249,8 @@ class DualModelReviewer:
         o3_review = await self.get_o3_review(pr_data, enhanced_prompts["o3"])
 
         comparison = self.learning_engine.compare_models(gpt4_review, o3_review)
-        insights = self.learning_engine.generate_learning_insights(comparison, pr_data)
-        self.learning_engine.store_learning_insights(insights, pr_data)
+        insights = self.learning_engine.gen_insights(comparison, pr_data)
+        self.learning_engine.store_insights(insights, pr_data)
 
         final_review = self.synthesize_reviews(gpt4_review, o3_review, comparison)
         self.logger.info(
@@ -281,25 +259,26 @@ class DualModelReviewer:
 
         return final_review, len(insights)
 
-    async def get_enhanced_prompts_with_insights(
+    async def get_new_prompts(
         self, pr_data: Dict[str, Any], base_prompt: str
     ) -> Dict[str, str]:
-
-        rag = RAGHandler()
-
+        try:
+            rag = RAGHandler()
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize RAG handler: {e}")
+            return {"gpt4": base_prompt, "o3": base_prompt}
         insights = await rag.get_relevant_learning_insights_with_context(
             pr_title=pr_data.get("title", ""),
             pr_description=pr_data.get("description", ""),
             changed_files=pr_data.get("changed_files", []),
             language=pr_data.get("language", ""),
-            max_insights=4,
         )
 
         if not insights:
             print("⚠️  No insights found, using base prompts only")
             return {"gpt4": base_prompt, "o3": base_prompt}
 
-        learning_section = self.format_insights_for_prompts(insights)
+        learning_section = self.format_insights(insights)
         gpt4_base = (
             base_prompt[:2000] + "..." if len(base_prompt) > 2000 else base_prompt
         )
@@ -309,28 +288,28 @@ class DualModelReviewer:
             "o3": f"{base_prompt}\n\n{learning_section}",
         }
 
-    def format_insights_for_prompts(self, insights: List[Dict[str, Any]]) -> str:
+    def format_insights(self, insights: List[Dict[str, Any]]) -> str:
         if not insights:
             return ""
 
-        high_relevance_insights = []
-        for insight in insights:
-            if isinstance(insight, dict) and "similarity_score" in insight:
-                if insight.get("similarity_score", 0.0) > 0.85:
-                    high_relevance_insights.append(insight)
-            else:
-                high_relevance_insights.append(insight)
+        high_relevance_insights = [
+            insight
+            for insight in insights
+            if isinstance(insight, dict)
+            and "similarity_score" in insight
+            and insight.get("similarity_score", 0.0) > 0.85
+            or not isinstance(insight, dict)
+        ]
 
         if not high_relevance_insights:
             return ""
 
         learning_section = "\n## 🧠 LEARNING PATTERNS\n**Apply these proven detection methods ONLY if clearly relevant:**\n\n"
 
-        for i, insight in enumerate(high_relevance_insights[:2], 1):  # Limit to top 2
+        for i, insight in enumerate(high_relevance_insights[:2], 1):
             if isinstance(insight, dict) and "insight" in insight:
-                insight_text = insight["insight"]
                 score = insight.get("similarity_score", 0.0)
-                learning_section += f"**{i}.** ({score:.2f}) {insight_text}\n\n"
+                learning_section += f"**{i}.** ({score:.2f}) {insight['insight']}\n\n"
             elif isinstance(insight, str):
                 learning_section += f"**{i}.** {insight}\n\n"
 
@@ -420,7 +399,7 @@ Focus on finding genuine problems that require immediate attention. Learning pat
             for insight in comparison.unique_to_o3[:10]:
                 combined += f"- {insight}\n"
 
-        combined += f"\n### 📊 Model Consensus Analysis\n"
+        combined += """\n### 📊 Model Consensus Analysis\n"""
         combined += f"- Agreement Score: {comparison.agreement_score:.2f}/1.0\n"
         combined += f"- Unique GPT-4 Findings: {len(comparison.unique_to_gpt4)}\n"
         combined += f"- Unique O3 Findings: {len(comparison.unique_to_o3)}\n"
